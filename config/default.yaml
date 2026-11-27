@@ -155,6 +155,44 @@ detector:
   # tracker_process_noise Q：多不相信"匀速"。调大 → 响应快但抖；调小 → 平滑但滞后
   # tracker_measure_noise R：多不相信 PnP 测量。调大 → 更信预测（更平滑更滞后）
   # 166 fps 下平滑收益很小，卡尔曼的真正价值是**延迟补偿**（外推到击发时刻）
-  enable_tracker: 0
+  # ---- 反陀螺（Anti-Gyro）：对付原地自旋的敌方机器人 --------------------
+  # 原理：装甲中心沿【空间圆】运动。抓住最近若干帧的平滑坐标，用 SVD 拟合
+  #       圆所在平面（法向=转轴）、代数法拟合圆（圆心=旋转中心）、
+  #       线性拟合相位（斜率=角速度 ω）。再由 90° 刚体关系推出另外三块。
+  #
+  # 关键：陀螺车 500 deg/s 时，20 ms 就转过 10°，一块板"正对"的窗口只有 ~40 ms。
+  #       所以不能瞄"现在正对的那块"，要瞄"击发时刻最正对的那块"——
+  #       它现在可能还藏在侧面。gyro_predict_ahead_s 就是这段提前量。
+  enable_gyro: 1
+  gyro_window: 45            # 拟合窗口（帧）；166 fps 下 45 帧 ≈ 0.27 s
+  gyro_min_samples: 12       # 少于该样本数不拟合，自动回退到原卡尔曼
+  gyro_min_omega_dps: 150    # 低于该角速度判为"不是在转"，不输出
+  gyro_max_plane_rms_m: 0.05 # 平面拟合残差上限（5 cm）
+  gyro_reset_frames: 30      # 连续丢帧多少后清空（≈0.18 s）
+  gyro_predict_ahead_s: 0.08 # 提前量：向前预测多久来选"击发时刻"该瞄哪块
+  gyro_face_on_deg: 25       # |yaw| 小于它认为"已正对，可直接打"
+  # 稳定性判据：真陀螺的 ω 和旋转中心必须在一段时间内一致。
+  # 没有这三条，缓曲线会被误拟合成"小圆"（实测非陀螺数据上 ω 乱跳 1000 deg/s）
+  gyro_stabilize_window: 10
+  gyro_max_omega_rel_std: 0.25
+  gyro_max_centre_spread_m: 0.08
+  # 一步预测误差上限：模型预测的下一帧位置 vs 实测。真陀螺 <1 cm，噪声拟合更大
+  gyro_max_pred_err_m: 0.020
+  # 旋转半径先验：小装甲中心到转轴约 0.075 m，大装甲约 0.115 m
+  gyro_expected_radius_m: 0.075
+  gyro_radius_tol: 0.45
+  # 画面上的彩色圆圈默认关闭：反陀螺在非陀螺目标上偶发误判时会闪出圆圈，
+  # 反而干扰演示。数据仍然完整输出到 CSV（gyro_* 列）和 --gyro-selftest。
+  # 需要看的时候临时改成 1。
+  draw_gyro: 0
+  # yaw 角速度下限（度/秒）：社区判"是否自旋"的主判据。低于它认为没在转。
+  gyro_min_yaw_rate_dps: 200
+
+  enable_tracker: 1
   tracker_process_noise: 0.001
   tracker_measure_noise: 0.01
+  # 延迟补偿（秒）：从曝光到真正击发的总延迟。位姿会给外推到"击发时刻"，
+  # 画面上橙色 PRED 圆点就是预测位置。典型 20~40 ms；填 0 等于不做预测
+  predict_latency_s: 0.020
+  # 是否绘制预测点（橙色圆 + PRED 标签）和面板上的预测坐标
+  draw_prediction: 1

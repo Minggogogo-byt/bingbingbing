@@ -5,6 +5,7 @@
 
 #include <array>
 #include <string>
+#include <array>
 #include <vector>
 
 namespace autoaim {
@@ -90,6 +91,32 @@ struct FrameResult {
   // 时序层选定的主目标下标；-1 表示"按原来的 score 顺序取"。
   // primaryIndex() 会优先返回它，于是绘制和 CSV 都自动跟随时序判定。
   int primary_override = -1;
+  // 卡尔曼预测（延迟补偿）：把当前位姿按速度外推到"击发时刻"的位置。
+  // predicted_px 是它在图像上的投影，用来在画面上画预测点。
+  bool has_prediction = false;
+  cv::Vec3d predicted_tvec{0, 0, 0};
+  cv::Point2f predicted_px{0.f, 0.f};
+  double predict_latency_ms = 0.0;
+  // ---- 反陀螺（Anti-Gyro）的输出 ----------------------------------------
+  // 四块装甲的 3D 坐标投影回画面后的像素位置，用于调试可视化。
+  bool gyro_valid = false;              // 本帧陀螺模型是否成立
+  cv::Vec3d gyro_centre{0, 0, 0};       // 旋转中心（相机系）
+  double gyro_omega_dps = 0.0;
+  double gyro_omega_yaw_dps = 0.0;     // yaw 角速度（社区主判据）          // 角速度（度/秒），符号=转向
+  int gyro_direction = 0;               // +1 逆时针 / -1 顺时针
+  int gyro_samples = 0;                 // 参与拟合的样本数
+  int gyro_best = -1;                   // 推荐交给云台的那块
+  std::array<cv::Vec3d, 4> gyro_armors; // 四块装甲中心（相机系，米）
+  std::array<cv::Point2f, 4> gyro_px;   // 四块装甲的投影像素
+  std::array<bool, 4> gyro_px_ok{{false, false, false, false}};
+  // 提前量：击发时刻该瞄哪块（"下一块"预测）
+  double gyro_best_yaw_at_fire = 0.0;   // 那块在击发时刻的 yaw（度）
+  bool gyro_best_is_current = false;    // true=就是现在这块，false=在瞄还没出现的那块
+  double gyro_t_to_face_s = -1.0;       // 还需多久它最正对（秒）
+  double gyro_predict_ahead_s = 0.0;    // 本次向前预测了多久
+  cv::Vec3d gyro_best_pos_at_fire{0, 0, 0};
+  cv::Point2f gyro_centre_px{0.f, 0.f};
+  bool gyro_centre_ok = false;
   // 时序状态码（0 无 / 1 确认 / 2 续帧 / 3 次候选），写进 CSV 便于复盘
   int track_state = 0;
 

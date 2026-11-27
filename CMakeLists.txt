@@ -24,6 +24,7 @@ add_executable(autoaim
   src/armor_matcher.cpp
   src/pnp_solver.cpp
   src/tracker.cpp
+  src/anti_gyro.cpp
   src/visualizer.cpp
 )
 

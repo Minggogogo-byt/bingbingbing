@@ -152,8 +152,41 @@ struct DetectorConfig {
   // 6 ms 内距离不会大幅变化，比值必须接近 1。
   double confirm_width_ratio = 1.4;
 
+  // ---- 反陀螺（Anti-Gyro）-----------------------------------------------
+  // 敌方机器人原地自旋时，装甲中心沿空间圆运动。本段参数控制"圆拟合"的
+  // 采样窗口与有效性门限，详见 include/autoaim/anti_gyro.hpp 的注释。
+  bool enable_gyro = true;
+  int gyro_window = 45;            // 环形缓冲帧数（166 fps 下约 0.27 秒）
+  int gyro_min_samples = 12;       // 少于这个样本数不做拟合，回退卡尔曼
+  double gyro_min_omega_dps = 150; // 低于此角速度判为"不是陀螺"
+  double gyro_max_plane_rms_m = 0.05;  // 平面拟合残差上限（米）
+  int gyro_reset_frames = 30;      // 连续丢帧多少后清空陀螺状态
+  int draw_gyro = 0;               // 是否把四块装甲投影回画面画圈（默认关，避免误判时闪烁）
+  // yaw 角速度下限：社区判"是否自旋"的主判据
+  double gyro_min_yaw_rate_dps = 200.0;
+  // 提前量（秒）：向前预测多久来挑"击发时刻该瞄哪块"。
+  // 陀螺车 500 deg/s 时，80 ms 就转过 40° —— 这才是"瞄下一块"的关键。
+  double gyro_predict_ahead_s = 0.08;
+  // 认为"已正对"的 yaw 门限（度），用于判断是否还需要提前瞄
+  double gyro_face_on_deg = 25.0;
+  // 稳定性判据：真陀螺的 ω 和旋转中心必须在一段时间内保持一致，
+  // 否则就是"把缓曲线拟合成小圆"的误判（实测非陀螺数据上 ω 会乱跳 1000 deg/s）
+  int gyro_stabilize_window = 10;      // 用最近多少次估计判断
+  double gyro_max_omega_rel_std = 0.25;    // ω 相对标准差上限
+  double gyro_max_centre_spread_m = 0.08;  // 圆心最大漂移（米）
+  // 一步预测误差上限：模型预测的下一帧位置 vs 实测。真陀螺 <1 cm，噪声拟合更大
+  double gyro_max_pred_err_m = 0.020;
+  // 旋转半径的物理先验：装甲中心到转轴的距离（小装甲约 0.075 m，大装甲约 0.115 m）
+  double gyro_expected_radius_m = 0.075;
+  double gyro_radius_tol = 0.45;   // 允许 ±45% 偏差
+
   // ---- tracking -----------------------------------------------------------
-  bool enable_tracker = false;
+  bool enable_tracker = true;
+  // 延迟补偿时间（秒）：从曝光到真正击发之间的总延迟，用来把位姿外推到击发时刻。
+  // 典型值 20~40 ms（曝光 + 传输 + 解算 + 开火指令）。填 0 就退化成"不做预测"。
+  double predict_latency_s = 0.020;
+  // 是否在画面上绘制预测点与预测坐标
+  int draw_prediction = 1;
   double tracker_process_noise = 1e-3;
   double tracker_measure_noise = 1e-2;
 };

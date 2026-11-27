@@ -31,6 +31,7 @@
 //   所以算法能优化到 3~6 ms，端到端仍然被解码卡住。这不是代码问题，
 //   是数据格式的物理成本。
 // ===========================================================================
+#include "autoaim/anti_gyro.hpp"
 #include "autoaim/armor_corners.hpp"
 #include "autoaim/armor_matcher.hpp"
 #include "autoaim/config.hpp"
@@ -41,6 +42,7 @@
 #include "autoaim/types.hpp"
 #include "autoaim/visualizer.hpp"
 
+#include <opencv2/calib3d.hpp>
 #include <opencv2/core.hpp>
 #include <opencv2/highgui.hpp>
 #include <opencv2/imgproc.hpp>
@@ -77,11 +79,79 @@ void printUsage() {
       "  --no-display         do not open a window\n  --show-all           also draw non-best candidates\n"
       "  --roi                enable ROI reuse around the tracked target\n"
       "  --tracker            enable the Kalman tracker\n"
-      "  --verbose            dump the config and print progress\n");
+      "  --verbose            dump the config and print progress\n"
+      "  --gyro-selftest      run the anti-gyro synthetic self test and exit\n");
 }
 
 }  // namespace
 
+// ===========================================================================
+// 反陀螺合成自检（--gyro-selftest）
+//
+// 为什么需要它：考核数据里没有"原地自旋"的目标，真实数据上无法验证反陀螺。
+// 这里构造一条参数已知的空间圆周轨迹喂给 GyroEstimator，再把拟合结果和真值
+// 对比 —— 误差很小就证明拟合数学是对的。
+//
+// 答辩时直接跑：./build/autoaim --gyro-selftest
+// ===========================================================================
+static int runGyroSelfTest() {
+  const double kRadius = 0.075;               // 真值：半径（米）
+  const double kOmegaDps = 500.0;             // 真值：角速度（度/秒）
+  const cv::Vec3d kCentre(0.0, 0.0, 2.0);     // 真值：旋转中心（相机系）
+  const double kFps = 165.93;
+
+  autoaim::GyroEstimator::Params gp;
+  gp.enabled = true;
+  gp.window = 45;
+  gp.min_samples = 12;
+  gp.min_omega_dps = 150.0;
+  gp.max_plane_rms_m = 0.05;
+  gp.reset_frames = 30;
+  gp.predict_ahead_s = 0.08;
+  gp.stabilize_window = 10;
+  autoaim::GyroEstimator ge(gp);
+
+  const int kFrames = 60;
+  for (int i = 0; i < kFrames; ++i) {
+    const double t = static_cast<double>(i) / kFps;
+    const double a = kOmegaDps * t * CV_PI / 180.0;
+    const cv::Vec3d p = kCentre + cv::Vec3d(kRadius * std::cos(a), 0.0, kRadius * std::sin(a));
+    const double yaw = std::atan2(std::cos(a), std::sin(a)) * 180.0 / CV_PI;
+    ge.push(p, yaw, t);
+  }
+
+  const autoaim::GyroState& st = ge.state();
+  std::printf("\n=========== 反陀螺合成自检 ===========\n");
+  std::printf("真值 : centre=(%.3f %.3f %.3f)  r=%.4f m  omega=%+.1f deg/s  axis=(0,1,0)\n",
+              kCentre[0], kCentre[1], kCentre[2], kRadius, kOmegaDps);
+  if (!st.valid) {
+    std::printf("拟合 : 未通过有效性判据（valid=0, samples=%d）\n", st.samples);
+    std::printf("失败原因 : %s\n", ge.failReason());
+    std::printf("调试     : lastOmega=%.2f deg/s  relStd=%.4f  hist=%d\n", ge.lastOmega(),
+                ge.lastOmegaRelStd(), ge.omegaHistorySize());
+    std::printf("=====================================\n\n");
+    return 2;
+  }
+  std::printf("拟合 : centre=(%.3f %.3f %.3f)  r=%.4f m  omega=%+.1f deg/s  axis=(%.2f %.2f %.2f)\n",
+              st.centre[0], st.centre[1], st.centre[2], st.radius, st.omega_dps,
+              st.axis[0], st.axis[1], st.axis[2]);
+  const double ec = cv::norm(st.centre - kCentre);
+  const double er = std::fabs(st.radius - kRadius);
+  const double eo = std::fabs(std::fabs(st.omega_dps) - kOmegaDps);
+  std::printf("误差 : 圆心 %.1f mm   半径 %.1f mm   角速度 %.1f deg/s   平面残差 %.2f mm\n",
+              ec * 1000.0, er * 1000.0, eo, st.fit_rms * 1000.0);
+  std::printf("四块装甲（相机系，米）：\n");
+  for (int k = 0; k < 4; ++k) {
+    std::printf("  plate[%d] (%.3f %.3f %.3f)  yaw=%+6.1f%s\n", k, st.armors[k][0],
+                st.armors[k][1], st.armors[k][2], st.yaws[k],
+                (k == st.best) ? "   <== 推荐打这块" : "");
+  }
+  std::printf("提前量 : %.0f ms -> 击发时刻该瞄 plate[%d]，yaw=%+.1f deg（%s）\n",
+              st.predict_ahead_s * 1000.0, st.best, st.best_yaw_deg,
+              st.best_is_current ? "就是当前这块" : "在瞄还没转过来的那块");
+  std::printf("=====================================\n\n");
+  return (ec < 0.02 && er < 0.01 && eo < 30.0) ? 0 : 3;
+}
 int main(int argc, char** argv) {
   autoaim::Config cfg;
 
@@ -131,6 +201,9 @@ int main(int argc, char** argv) {
       force_tracker = 1;
     } else if (a == "--verbose") {
       verbose = true;
+    } else if (a == "--gyro-selftest") {
+      // 反陀螺合成自检：不读视频、不读配置，直接用已知真值的圆周轨迹验证拟合
+      return runGyroSelfTest();
     } else if (a == "-h" || a == "--help") {
       printUsage();
       return 0;
@@ -153,6 +226,7 @@ int main(int argc, char** argv) {
     return 2;
   }
   if (!calib_path.empty()) cfg.loadCalibration(calib_path);
+
   if (force_roi >= 0) cfg.detector.enable_roi = (force_roi != 0);
   if (force_tracker >= 0) cfg.detector.enable_tracker = (force_tracker != 0);
 
@@ -179,6 +253,19 @@ int main(int argc, char** argv) {
   autoaim::ArmorMatcher matcher(cfg.detector);
   autoaim::PnpSolver solver(cfg.camera, cfg.detector);
   autoaim::ArmorTracker tracker(cfg.detector);
+  // 反陀螺估计器：只读卡尔曼的输出，在它之上做"空间圆拟合"。
+  autoaim::GyroEstimator gyro;
+  {
+    autoaim::GyroEstimator::Params g;
+    g.enabled = cfg.detector.enable_gyro;
+    g.window = cfg.detector.gyro_window;
+    g.min_samples = cfg.detector.gyro_min_samples;
+    g.min_omega_dps = cfg.detector.gyro_min_omega_dps;
+    g.max_plane_rms_m = cfg.detector.gyro_max_plane_rms_m;
+    g.reset_frames = cfg.detector.gyro_reset_frames;
+    gyro.configure(g);
+  }
+
   autoaim::TargetTracker target_tracker;
   target_tracker.configure(cfg.detector.confirm_hits, cfg.detector.confirm_max_misses,
                            cfg.detector.confirm_gate_m, cfg.detector.confirm_gate_px,
@@ -205,7 +292,7 @@ int main(int argc, char** argv) {
   if (!out_csv.empty()) {
     csv.open(out_csv);
     csv << "frame,decode_ms,detect_ms,match_ms,pnp_ms,total_ms,n_bars,n_armors,"
-           "pose_ok,x,y,z,yaw_deg,pitch_deg,reproj_err_px,track_state\n";
+           "pose_ok,x,y,z,yaw_deg,pitch_deg,reproj_err_px,track_state,gyro_valid,omega_yaw_dps,gyro_best,gyro_t_to_face_s\n";
   }
 
   cv::Mat frame;
@@ -231,6 +318,7 @@ int main(int argc, char** argv) {
   int n_full_frames = 0;
   int n_fallback = 0;
   int n_roi_retry = 0;
+  int n_pred = 0;   // 有卡尔曼预测输出的帧数
   int lost = 0;
   std::vector<double> detect_ms, match_ms, pnp_ms, total_ms, zs, errs;
 
@@ -386,6 +474,18 @@ int main(int argc, char** argv) {
       pose_ok = res.poses[primary].ok;
     }
 
+    // ---------------------------------------------------------------------
+    // 卡尔曼预测（延迟补偿）
+    //
+    // 位姿对应的是"曝光那一刻"的目标位置，但从曝光到真正击发还有一段延迟
+    // （传输 + 解算 + 开火指令，典型 20~40 ms）。这段时间目标会移动，
+    // 所以用滤波器估出的速度把位置外推：
+    //
+    //     p_pred = p_now + v × t_latency
+    //
+    // 然后把 p_pred 投影回图像，画面上画出来 —— 这就是"预瞄点"。
+    // 实测目标横向 1 m/s 时，20 ms 对应 2 cm，在 2 m 处约 3 px。
+    // ---------------------------------------------------------------------
     if (pose_ok) {
       const autoaim::Pose& p = res.poses[primary];
       ++n_pose;
@@ -402,6 +502,84 @@ int main(int argc, char** argv) {
       // 长时间丢失（超过 ROI 容忍帧数的 3 倍）后重置滤波器。
       // 否则陈旧的速度估计会一直把预测位置往外甩，重新捕获时窗口完全偏离目标。
       if (lost > cfg.detector.roi_lost_frames * 3) tracker.reset();
+    }
+
+    // ------------------------------------------------------------------
+    // 反陀螺（Anti-Gyro）
+    //
+    // 位置：严格在"卡尔曼之后"。它**只读**卡尔曼平滑后的位置，不修改滤波器，
+    // 也不替换 PnP 输出 —— 原来那套仍然是"当前这块装甲"的唯一来源。
+    //
+    // 逻辑：把最近若干帧的平滑位置喂进去，拟合出旋转中心/转轴/角速度，
+    // 再用 90° 刚体关系推出另外三块。拟合不成立（样本不足、残差大、
+    // 角速度太小）时 state().valid 为 false，主循环自动继续用卡尔曼。
+    // ------------------------------------------------------------------
+    {
+      const double t_sec = static_cast<double>(index) / std::max(src_fps, 1.0);
+      if (pose_ok) {
+        double gyaw = 0.0, gpitch = 0.0;
+        res.poses[primary].yawPitchDeg(&gyaw, &gpitch);
+        // 传入的是"卡尔曼平滑后的位置"而不是原始 PnP 结果，原因：
+        // 单帧 PnP 有 0.4 px 抖动，直接拟合圆会把噪声当成角速度。
+        gyro.push(tracker.position(), gyaw, t_sec);
+      } else {
+        gyro.miss();   // 丢帧：模型若仍有效会按角速度外推相位，抗短暂遮挡
+      }
+
+      const autoaim::GyroState& gs = gyro.state();
+      res.gyro_valid = gs.valid;
+      res.gyro_centre = gs.centre;
+      res.gyro_omega_dps = gs.omega_dps;
+      res.gyro_omega_yaw_dps = gs.omega_yaw_dps;
+      res.gyro_direction = gs.direction;
+      res.gyro_samples = gs.samples;
+      res.gyro_best = gs.best;
+      res.gyro_armors = gs.armors;
+      res.gyro_best_yaw_at_fire = gs.best_yaw_deg;
+      res.gyro_best_is_current = gs.best_is_current;
+      res.gyro_predict_ahead_s = gs.predict_ahead_s;
+      res.gyro_best_pos_at_fire = gs.best_pos_at_fire;
+      if (gs.best >= 0 && gs.best < 4) res.gyro_t_to_face_s = gs.t_to_face_s[static_cast<size_t>(gs.best)];
+
+      // 把四块装甲的 3D 坐标投影回像素，用于调试可视化。
+      // projectPoints 会考虑镜头畸变，和 PnP 的成像模型完全一致。
+      if (gs.valid && cfg.detector.draw_gyro != 0) {
+        // 投影用手写针孔公式，不调 cv::projectPoints。
+        // 原因：projectPoints 在 4.5.4 里对 InputArray 的临时对象类型推导很挑，
+        // 之前就是在这里抛 cv::Exception。而调试用的圈只需要线性投影：
+        //   u = fx·X/Z + cx,  v = fy·Y/Z + cy
+        // 忽略畸变带来的误差约 0.3%，对"画圈看位置"完全够用。
+        auto project = [&](const cv::Vec3d& P) {
+          return cv::Point2f(static_cast<float>(cfg.camera.fx * P[0] / P[2] + cfg.camera.cx),
+                             static_cast<float>(cfg.camera.fy * P[1] / P[2] + cfg.camera.cy));
+        };
+        if (gs.centre[2] > 0.15) {
+          res.gyro_centre_px = project(gs.centre);
+          res.gyro_centre_ok = true;
+        }
+        for (int k = 0; k < 4; ++k) {
+          if (gs.armors[k][2] <= 0.15) continue;
+          const cv::Point2f px = project(gs.armors[k]);
+          res.gyro_px[k] = px;
+          res.gyro_px_ok[k] = px.x >= 0 && px.x < frame.cols && px.y >= 0 &&
+                              px.y < frame.rows;
+        }
+      }
+    }
+    // 计算并投影预测点：只要滤波器已有状态就算，丢帧续推时同样成立
+    if (cfg.detector.enable_tracker && tracker.initialized()) {
+      const cv::Vec3d v = tracker.velocity();
+      const cv::Vec3d now = tracker.position();
+      const cv::Vec3d pred = now + v * (cfg.detector.predict_latency_s * src_fps);
+      if (pred[2] > 0.1) {
+        res.has_prediction = true;
+        res.predicted_tvec = pred;
+        res.predicted_px = cv::Point2f(
+            static_cast<float>(cfg.camera.fx * pred[0] / pred[2] + cfg.camera.cx),
+            static_cast<float>(cfg.camera.fy * pred[1] / pred[2] + cfg.camera.cy));
+        res.predict_latency_ms = cfg.detector.predict_latency_s * 1000.0;
+        ++n_pred;   // 统计"预测覆盖率"，写在计算之后才准
+      }
     }
 
     res.timing.decode_ms = decode_ms;
@@ -434,7 +612,10 @@ int main(int argc, char** argv) {
       }
       // 时序状态：0 无 / 1 确认 / 2 续帧 / 3 次候选 —— 复盘时按这列能区分
       // "这一帧是真目标、还是预测续帧、还是没确认的候选"
-      csv << ',' << res.track_state << '\n';
+      // 反陀螺数据（即使画面不画，也必须输出：评估"是否自旋"要看这一列）
+      csv << ',' << res.track_state << ',' << (res.gyro_valid ? 1 : 0) << ','
+          << res.gyro_omega_yaw_dps << ',' << res.gyro_best << ','
+          << res.gyro_t_to_face_s << '\n';
     }
 
     detect_ms.push_back(res.timing.detect_ms);
@@ -448,6 +629,8 @@ int main(int argc, char** argv) {
       opt.inset_ratio = static_cast<float>(cfg.detector.draw_inset_ratio);
       opt.extra_height_ratio = static_cast<float>(cfg.detector.draw_extra_height_ratio);
       opt.show_tentative = cfg.detector.draw_tentative != 0;
+      opt.show_prediction = cfg.detector.draw_prediction != 0;
+      opt.show_gyro = cfg.detector.draw_gyro != 0;
       autoaim::drawOverlay(frame, res, opt);
     }
     if (!out_video.empty()) writer.write(frame);
@@ -493,6 +676,8 @@ int main(int argc, char** argv) {
               median(total_ms), 1000.0 / std::max(median(total_ms), 1e-9));
   std::printf("end-to-end        %.1f FPS over %.2f s wall time\n",
               n_frames / std::max(wall, 1e-9), wall);
+  std::printf("prediction        %.1f %% of frames (latency %.0f ms)\n",
+              100.0 * n_pred / nf, cfg.detector.predict_latency_s * 1000.0);
   std::printf("median range      %.3f m\n", median(zs));
   std::printf("median reproj err %.3f px\n", median(errs));
   std::printf("=========================================\n");

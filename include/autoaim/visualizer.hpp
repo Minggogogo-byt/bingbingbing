@@ -14,6 +14,10 @@ struct DrawOptions {
   // 是否绘制未通过时序确认的候选。默认 false：只出现一两帧的候选如果照画，
   // 画面上就会一闪而过一个青框，看起来像误检 —— 其实它已经被时序确认挡住了。
   bool show_tentative = false;
+  // 是否绘制卡尔曼预测点（延迟补偿后的预瞄位置）
+  bool show_prediction = true;
+  // 是否把反陀螺推出的四块装甲投影回画面画圈（不同颜色）
+  bool show_gyro = true;
   // Outward inflation of the DRAWN quad, pixels at 1440 px width. The PnP corners
   // sit on the thresholded core of each bar, which is a few pixels inside the
   // visible glow; drawing them exactly makes the box look like it cuts the bars.

@@ -241,7 +241,26 @@ Config Config::load(const std::string& path) {
     get(d, "confirm_gate_px", &t.confirm_gate_px);
     get(d, "confirm_width_ratio", &t.confirm_width_ratio);
 
+    get(d, "enable_gyro", &t.enable_gyro);
+    get(d, "gyro_window", &t.gyro_window);
+    get(d, "gyro_min_samples", &t.gyro_min_samples);
+    get(d, "gyro_min_omega_dps", &t.gyro_min_omega_dps);
+    get(d, "gyro_max_plane_rms_m", &t.gyro_max_plane_rms_m);
+    get(d, "gyro_reset_frames", &t.gyro_reset_frames);
+    get(d, "draw_gyro", &t.draw_gyro);
+    get(d, "gyro_min_yaw_rate_dps", &t.gyro_min_yaw_rate_dps);
+    get(d, "gyro_predict_ahead_s", &t.gyro_predict_ahead_s);
+    get(d, "gyro_face_on_deg", &t.gyro_face_on_deg);
+    get(d, "gyro_stabilize_window", &t.gyro_stabilize_window);
+    get(d, "gyro_max_omega_rel_std", &t.gyro_max_omega_rel_std);
+    get(d, "gyro_max_centre_spread_m", &t.gyro_max_centre_spread_m);
+    get(d, "gyro_max_pred_err_m", &t.gyro_max_pred_err_m);
+    get(d, "gyro_expected_radius_m", &t.gyro_expected_radius_m);
+    get(d, "gyro_radius_tol", &t.gyro_radius_tol);
+
     get(d, "enable_tracker", &t.enable_tracker);
+    get(d, "predict_latency_s", &t.predict_latency_s);
+    get(d, "draw_prediction", &t.draw_prediction);
     get(d, "tracker_process_noise", &t.tracker_process_noise);
     get(d, "tracker_measure_noise", &t.tracker_measure_noise);
   }

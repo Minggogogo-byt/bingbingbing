@@ -196,6 +196,7 @@ void drawOverlay(cv::Mat& bgr, const FrameResult& result, const DrawOptions& opt
                                       : static_cast<int>(std::lround(6 * s)),
               col, 2);
 
+
     const double label_scale = (emphasize ? 0.85 : 0.65) * s;
     const int label_thick = 2;
     const bool show_labels = opt.show_corner_ids && diag > 45.0;
@@ -221,6 +222,86 @@ void drawOverlay(cv::Mat& bgr, const FrameResult& result, const DrawOptions& opt
     }
   }
 
+  // ------------------------------------------------- 卡尔曼预测点（每帧只画一次）
+  //
+  // 放在"逐装甲板循环"之外，因为最关键的情况恰恰是"这一帧检测失败、
+  // 但目标其实还在"——那时没有任何装甲板可画，只能靠预测点维持目标。
+  //
+  // 物理含义：位姿对应曝光那一刻，而击发还有 predict_latency_ms 的延迟，
+  // 这个橙色点就是"到真正开火时，装甲板预计在哪里"。
+  if (opt.show_prediction && result.has_prediction) {
+    const cv::Point pp(cv::Point(result.predicted_px));
+    const cv::Scalar kPredCol(0, 165, 255);  // BGR 橙
+    const int r = static_cast<int>(std::lround(7 * s));
+    cv::circle(bgr, pp, r, kPredCol, 2, cv::LINE_AA);
+    cv::circle(bgr, pp, 2, kPredCol, -1, cv::LINE_AA);
+    // 十字准星，表示"预瞄点"
+    cv::line(bgr, cv::Point(pp.x - r - 4, pp.y), cv::Point(pp.x + r + 4, pp.y), kPredCol, 1,
+             cv::LINE_AA);
+    cv::line(bgr, cv::Point(pp.x, pp.y - r - 4), cv::Point(pp.x, pp.y + r + 4), kPredCol, 1,
+             cv::LINE_AA);
+    if (primary >= 0 && static_cast<size_t>(primary) < result.armors.size()) {
+      cv::line(bgr, cv::Point(result.armors[primary].center), pp, kPredCol, 1, cv::LINE_AA);
+    }
+    // textOutlined 的签名是 (img, text, org, scale, colour, thickness)，
+    // 没有"描边色"参数，轮廓色是内部固定的黑色。
+    textOutlined(bgr, "PRED",
+                 pp + cv::Point(static_cast<int>(12 * s), static_cast<int>(-12 * s)), 0.6 * s,
+                 kPredCol, 2);
+  }
+
+  // ---------------------------------------------- 反陀螺：四块装甲的可视化
+  //
+  // 把陀螺模块推出的四块装甲（含被遮挡的三块）的 3D 坐标投影回画面，
+  // 用四种颜色画空心圆。实心小点表示"当前实测那块"（= 相位 0）。
+  //
+  // 颜色约定：
+  //   青   plate 0（当前实测）
+  //   黄   plate 1
+  //   紫   plate 2
+  //   蓝   plate 3
+  //   白粗 推荐交给云台的那块（best）
+  //
+  // 画出的圆不在真实装甲位置上（被遮挡的板本来就不在画面里），
+  // 它们表示"按陀螺模型推断，那块板此刻在图像上会投影到哪"。
+  if (opt.show_gyro && result.gyro_valid) {
+    static const cv::Scalar kGyroCol[4] = {
+        cv::Scalar(255, 255, 0),    // 青 BGR(255,255,0)
+        cv::Scalar(0, 220, 255),    // 黄
+        cv::Scalar(255, 0, 220),    // 紫
+        cv::Scalar(255, 120, 0)};   // 蓝
+    for (int k = 0; k < 4; ++k) {
+      if (!result.gyro_px_ok[static_cast<size_t>(k)]) continue;
+      const cv::Point pp(cv::Point(result.gyro_px[static_cast<size_t>(k)]));
+      const cv::Scalar col = kGyroCol[k];
+      const bool is_best = (k == result.gyro_best);
+      const int r = static_cast<int>(std::lround((is_best ? 22 : 14) * s));
+      cv::circle(bgr, pp, r, col, is_best ? 3 : 2, cv::LINE_AA);
+      if (k == 0) cv::circle(bgr, pp, 3, col, -1, cv::LINE_AA);  // 实测块画实心
+      if (is_best) {
+        char gb[32];
+        std::snprintf(gb, sizeof(gb), "GYRO BEST");
+        textOutlined(bgr, gb, pp + cv::Point(r + 4, -r), 0.55 * s, cv::Scalar(255, 255, 255), 2);
+      }
+    }
+    // 旋转中心（灰白小方框）：判断拟合出的圆心是否落在目标身上
+    if (result.gyro_centre_ok) {
+      const cv::Point cc(cv::Point(result.gyro_centre_px));
+      cv::rectangle(bgr, cc - cv::Point(6, 6), cc + cv::Point(6, 6),
+                    cv::Scalar(200, 200, 200), 1, cv::LINE_AA);
+      cv::line(bgr, cc - cv::Point(9, 0), cc + cv::Point(9, 0), cv::Scalar(200, 200, 200), 1);
+      cv::line(bgr, cc - cv::Point(0, 9), cc + cv::Point(0, 9), cv::Scalar(200, 200, 200), 1);
+    }
+    // 提前量提示：如果最优板不是当前这块，说明在"瞄还没转过来的那块"
+    if (!result.gyro_best_is_current) {
+      char nb[96];
+      std::snprintf(nb, sizeof(nb), "NEXT +%.0fms  yaw %+.0f deg",
+                    result.gyro_predict_ahead_s * 1000.0, result.gyro_best_yaw_at_fire);
+      textOutlined(bgr, nb, cv::Point(static_cast<int>(14 * s), static_cast<int>(108 * s)),
+                   0.75 * s, cv::Scalar(255, 255, 255), 2);
+    }
+  }
+
   // ---------------------------------------------------------------- HUD
   char hud[256];
   const double ms = result.timing.total_ms;
@@ -239,7 +320,17 @@ void drawOverlay(cv::Mat& bgr, const FrameResult& result, const DrawOptions& opt
   std::vector<std::string> panel;
   const Pose* p = result.primaryPose();
   if (p == nullptr || primary < 0) {
-    panel.emplace_back("no armor");
+    // 这一帧没检出装甲板。如果滤波器还在续推，就把预测位置报出来 ——
+    // 这正是"短暂遮挡不甩丢"要展示的状态：没有实测，但有预测。
+    if (result.has_prediction) {
+      panel.emplace_back("no armor  (coasting)");
+      char ph[128];
+      std::snprintf(ph, sizeof(ph), "PRED %+.3f %+.3f %+.3f m", result.predicted_tvec[0],
+                    result.predicted_tvec[1], result.predicted_tvec[2]);
+      panel.emplace_back(ph);
+    } else {
+      panel.emplace_back("no armor");
+    }
     drawPanel(bgr, cv::Point(static_cast<int>(14 * s), static_cast<int>(120 * s)), panel,
               0.85 * s);
     return;
@@ -263,6 +354,13 @@ void drawOverlay(cv::Mat& bgr, const FrameResult& result, const DrawOptions& opt
     panel.emplace_back(hud);
     std::snprintf(hud, sizeof(hud), "reproj err %.2f px", p->reproj_err_px);
     panel.emplace_back(hud);
+    // 卡尔曼预测（延迟补偿）：把位姿按速度外推到击发时刻
+    if (result.has_prediction) {
+      std::snprintf(hud, sizeof(hud), "pred %+.3f %+.3f %+.3f m  (+%.0f ms)",
+                    result.predicted_tvec[0], result.predicted_tvec[1],
+                    result.predicted_tvec[2], result.predict_latency_ms);
+      panel.emplace_back(hud);
+    }
     // 时序状态：0 无 / 1 确认 / 2 续帧(丢失容忍期内, 用预测位置) / 3 次候选
     static const char* kTrackText[4] = {"none", "confirmed", "predicted", "tentative"};
     const int ts = (result.track_state >= 0 && result.track_state < 4) ? result.track_state : 0;
